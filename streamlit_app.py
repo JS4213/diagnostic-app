@@ -1,18 +1,17 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
-import re
 
 st.set_page_config(page_title="Diagnostic Agent PRO", layout="wide")
 
-st.title("🧠 Diagnostic Agent PRO (XML Engine)")
-st.write("Paste full device XML log for full diagnostic analysis.")
+st.title("🧠 Diagnostic Agent PRO (Full Engine)")
+st.write("Paste full XML log to analyse system + history faults")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 # -----------------------------
-# LOAD EXCEL ERROR TABLE
+# LOAD EXCEL (Err Code sheet)
 # -----------------------------
 @st.cache_data
 def load_data():
@@ -44,7 +43,7 @@ def parse_xml(xml_text):
 
     data = {}
 
-    # System properties
+    # system properties
     data["system"] = {}
     for prop in root.findall(".//property"):
         pid = prop.attrib.get("id")
@@ -52,20 +51,20 @@ def parse_xml(xml_text):
         if pid and val is not None:
             data["system"][pid] = val.text
 
-    # Modules
+    # modules
     modules = []
     for m in root.findall(".//modules/*"):
-        mod_data = {}
+        mod = {}
         for child in m:
-            mod_data[child.tag] = child.text
-        modules.append(mod_data)
+            mod[child.tag] = child.text
+        modules.append(mod)
 
     data["modules"] = modules
 
-    # History
+    # history entries
     history = []
     for h in root.findall(".//history/entry"):
-        history.append(h.text)
+        history.append(h.text.strip() if h.text else "")
 
     data["history"] = history
 
@@ -73,40 +72,68 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# ANALYSE SYSTEM STATE
+# HISTORY FAULT DETECTION
+# -----------------------------
+def detect_history_faults(history_entries):
+    faults = []
+
+    parsed = []
+    for entry in history_entries:
+        if not entry:
+            continue
+        parsed.append(entry.split())
+
+    for i in range(1, len(parsed)):
+        prev = parsed[i - 1]
+        curr = parsed[i]
+
+        min_len = min(len(prev), len(curr))
+
+        for j in range(min_len):
+            if prev[j] != curr[j]:
+                faults.append({
+                    "position": j,
+                    "from": prev[j],
+                    "to": curr[j],
+                    "entry_index": i
+                })
+
+    return faults
+
+
+# -----------------------------
+# SYSTEM ANALYSIS
 # -----------------------------
 def analyze(data):
     report = {}
 
-    # system error
     report["system_error"] = data["system"].get("System:ErrorCode", "00")
 
-    # voltage imbalance
-    voltages = []
+    # voltage analysis
+    volts = []
     for m in data["modules"]:
         try:
-            voltages.append(float(m["act"]))
+            volts.append(float(m.get("act", 0)))
         except:
             pass
 
-    if voltages:
-        spread = max(voltages) - min(voltages)
-        report["voltage_spread"] = round(spread, 3)
-        report["electrical_status"] = "IMBALANCED" if spread > 0.3 else "OK"
+    if volts:
+        report["voltage_spread"] = round(max(volts) - min(volts), 3)
+        report["electrical_status"] = "IMBALANCED" if report["voltage_spread"] > 0.3 else "OK"
 
-    # temperature check
+    # temp analysis
     temps = []
     for m in data["modules"]:
         try:
-            temps.append(float(m["act"]))
+            temps.append(float(m.get("act", 0)))
         except:
             pass
 
     if temps:
-        report["thermal_status"] = "OK" if max(temps) < 45 else "HIGH"
+        report["thermal_status"] = "HIGH" if max(temps) > 45 else "OK"
 
     # history
-    report["history_events"] = len(data["history"])
+    report["history_faults"] = detect_history_faults(data["history"])
 
     return report
 
@@ -118,14 +145,10 @@ err_map = load_data()
 
 
 # -----------------------------
-# UI INPUT
+# UI
 # -----------------------------
 xml_input = st.text_area("Paste XML Log", height=300)
 
-
-# -----------------------------
-# RUN DIAGNOSIS
-# -----------------------------
 if st.button("Run Full Diagnosis"):
     try:
         data = parse_xml(xml_input)
@@ -134,31 +157,52 @@ if st.button("Run Full Diagnosis"):
         st.subheader("📊 System Analysis")
         st.json(result)
 
+        # -----------------------------
+        # SYSTEM ERROR LOOKUP
+        # -----------------------------
+        st.subheader("🧠 System Error Diagnosis")
+
+        sys_code = result["system_error"]
+
+        if sys_code != "00" and sys_code in err_map:
+            err = err_map[sys_code]
+
+            st.error(f"Error Code: {sys_code}")
+            st.write(f"**Name:** {err['name']}")
+            st.write(f"**Description:** {err['description']}")
+        else:
+            st.success("No active system error found")
+
+        # -----------------------------
+        # HISTORY FAULTS
+        # -----------------------------
+        st.subheader("📡 History Fault Detection")
+
+        history_faults = result["history_faults"]
+
+        if history_faults:
+            for f in history_faults:
+                code = f["to"]
+
+                st.write(f"Byte {f['position']}: {f['from']} → {f['to']}")
+
+                if code in err_map:
+                    err = err_map[code]
+                    st.error(f"{err['name']}")
+                    st.write(err["description"])
+                else:
+                    st.warning(f"Unknown mapped code: {code}")
+        else:
+            st.info("No history anomalies detected")
+
+        # -----------------------------
+        # RAW SNAPSHOT
+        # -----------------------------
         st.subheader("🔍 System Snapshot")
         st.json(data["system"])
 
-        st.subheader("📦 Module Data")
+        st.subheader("📦 Modules")
         st.write(data["modules"])
-
-        st.subheader("📜 History")
-        st.write(data["history"])
-
-        # -----------------------------
-        # ERROR LOOKUP (THIS IS THE FIX)
-        # -----------------------------
-        system_error = result["system_error"]
-
-        st.subheader("🧠 Error Diagnosis")
-
-        if system_error != "00" and system_error in err_map:
-            err = err_map[system_error]
-
-            st.error(f"Error Code: {system_error}")
-            st.write(f"**Name:** {err['name']}")
-            st.write(f"**Description:** {err['description']}")
-
-        else:
-            st.success("No active error found in system (or not listed in Excel)")
 
     except Exception as e:
         st.error(f"Error parsing XML: {e}")
