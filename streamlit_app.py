@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import re
 
-st.set_page_config(page_title="Diagnostic Agent Pro", layout="wide")
+st.set_page_config(page_title="Diagnostic Agent PRO", layout="wide")
 
 st.title("🧠 Diagnostic Agent PRO (XML Engine)")
 st.write("Paste full device XML log for full diagnostic analysis.")
@@ -11,9 +11,12 @@ st.write("Paste full device XML log for full diagnostic analysis.")
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
+# -----------------------------
+# LOAD EXCEL ERROR TABLE
+# -----------------------------
 @st.cache_data
 def load_data():
-    xls = pd.ExcelFile("Err Code and interpretation_V1.11_APS.xlsx")
+    xls = pd.ExcelFile(EXCEL_FILE)
 
     err_map = {}
 
@@ -32,6 +35,10 @@ def load_data():
 
     return err_map
 
+
+# -----------------------------
+# PARSE XML
+# -----------------------------
 def parse_xml(xml_text):
     root = ET.fromstring(xml_text)
 
@@ -45,7 +52,7 @@ def parse_xml(xml_text):
         if pid and val is not None:
             data["system"][pid] = val.text
 
-    # modules
+    # Modules
     modules = []
     for m in root.findall(".//modules/*"):
         mod_data = {}
@@ -55,7 +62,7 @@ def parse_xml(xml_text):
 
     data["modules"] = modules
 
-    # history
+    # History
     history = []
     for h in root.findall(".//history/entry"):
         history.append(h.text)
@@ -65,18 +72,20 @@ def parse_xml(xml_text):
     return data
 
 
+# -----------------------------
+# ANALYSE SYSTEM STATE
+# -----------------------------
 def analyze(data):
     report = {}
 
-    # 1. system error
-    report["system_error"] = data["system"].get("System:ErrorCode", "unknown")
+    # system error
+    report["system_error"] = data["system"].get("System:ErrorCode", "00")
 
-    # 2. voltage imbalance
+    # voltage imbalance
     voltages = []
     for m in data["modules"]:
         try:
-            v = float(m["act"])
-            voltages.append(v)
+            voltages.append(float(m["act"]))
         except:
             pass
 
@@ -85,44 +94,71 @@ def analyze(data):
         report["voltage_spread"] = round(spread, 3)
         report["electrical_status"] = "IMBALANCED" if spread > 0.3 else "OK"
 
-    # 3. temperature check
+    # temperature check
     temps = []
     for m in data["modules"]:
         try:
-            t = float(m.get("act", 0))
-            temps.append(t)
+            temps.append(float(m["act"]))
         except:
             pass
 
-    report["thermal_status"] = "OK" if max(temps) < 45 else "HIGH"
+    if temps:
+        report["thermal_status"] = "OK" if max(temps) < 45 else "HIGH"
 
-    # 4. history presence
+    # history
     report["history_events"] = len(data["history"])
-    report["historical_faults"] = "YES" if len(data["history"]) > 5 else "LOW"
 
     return report
 
 
-excel_map = load_excel()
+# -----------------------------
+# LOAD EXCEL
+# -----------------------------
+err_map = load_data()
 
+
+# -----------------------------
+# UI INPUT
+# -----------------------------
 xml_input = st.text_area("Paste XML Log", height=300)
 
+
+# -----------------------------
+# RUN DIAGNOSIS
+# -----------------------------
 if st.button("Run Full Diagnosis"):
     try:
         data = parse_xml(xml_input)
         result = analyze(data)
 
-        st.subheader("📊 Diagnostic Report")
+        st.subheader("📊 System Analysis")
         st.json(result)
 
         st.subheader("🔍 System Snapshot")
         st.json(data["system"])
 
-        st.subheader("📦 Module Overview")
+        st.subheader("📦 Module Data")
         st.write(data["modules"])
 
-        st.subheader("📜 History Entries")
+        st.subheader("📜 History")
         st.write(data["history"])
+
+        # -----------------------------
+        # ERROR LOOKUP (THIS IS THE FIX)
+        # -----------------------------
+        system_error = result["system_error"]
+
+        st.subheader("🧠 Error Diagnosis")
+
+        if system_error != "00" and system_error in err_map:
+            err = err_map[system_error]
+
+            st.error(f"Error Code: {system_error}")
+            st.write(f"**Name:** {err['name']}")
+            st.write(f"**Description:** {err['description']}")
+
+        else:
+            st.success("No active error found in system (or not listed in Excel)")
 
     except Exception as e:
         st.error(f"Error parsing XML: {e}")
