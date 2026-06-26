@@ -1,22 +1,21 @@
 import streamlit as st
+import xml.etree.ElementTree as ET
 import pandas as pd
 import re
 
-st.set_page_config(page_title="Diagnostic Agent", layout="wide")
+st.set_page_config(page_title="Diagnostic Agent Pro", layout="wide")
 
-st.title("🧠 Diagnostic Agent")
-st.write("Paste your device log below and get instant fault diagnosis.")
+st.title("🧠 Diagnostic Agent PRO (XML Engine)")
+st.write("Paste full device XML log for full diagnostic analysis.")
 
-# Load Excel file (you will upload it to GitHub later)
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 @st.cache_data
-def load_data():
+def load_excel():
     xls = pd.ExcelFile(EXCEL_FILE)
 
     err_map = {}
-    source_map = {}
 
     for sheet in xls.sheet_names:
         if "err" in sheet.lower():
@@ -27,47 +26,100 @@ def load_data():
                 code = str(row.iloc[0]).strip()
                 err_map[code] = row.to_dict()
 
-        if "source" in sheet.lower():
-            df = pd.read_excel(xls, sheet)
-            df.columns = [c.strip() for c in df.columns]
-
-            for _, row in df.iterrows():
-                key = str(row.iloc[0]).strip()
-                source_map[key] = row.to_dict()
-
-    return err_map, source_map
+    return err_map
 
 
-def extract_codes(text):
-    return list(set(re.findall(r"0x[0-9a-fA-F]+", text)))
+def parse_xml(xml_text):
+    root = ET.fromstring(xml_text)
+
+    data = {}
+
+    # System properties
+    data["system"] = {}
+    for prop in root.findall(".//property"):
+        pid = prop.attrib.get("id")
+        val = prop.find("value")
+        if pid and val is not None:
+            data["system"][pid] = val.text
+
+    # modules
+    modules = []
+    for m in root.findall(".//modules/*"):
+        mod_data = {}
+        for child in m:
+            mod_data[child.tag] = child.text
+        modules.append(mod_data)
+
+    data["modules"] = modules
+
+    # history
+    history = []
+    for h in root.findall(".//history/entry"):
+        history.append(h.text)
+
+    data["history"] = history
+
+    return data
 
 
-try:
-    err_map, source_map = load_data()
-except Exception as e:
-    st.error("Missing Excel file. Upload it to the same GitHub repo.")
-    st.stop()
+def analyze(data):
+    report = {}
+
+    # 1. system error
+    report["system_error"] = data["system"].get("System:ErrorCode", "unknown")
+
+    # 2. voltage imbalance
+    voltages = []
+    for m in data["modules"]:
+        try:
+            v = float(m["act"])
+            voltages.append(v)
+        except:
+            pass
+
+    if voltages:
+        spread = max(voltages) - min(voltages)
+        report["voltage_spread"] = round(spread, 3)
+        report["electrical_status"] = "IMBALANCED" if spread > 0.3 else "OK"
+
+    # 3. temperature check
+    temps = []
+    for m in data["modules"]:
+        try:
+            t = float(m.get("act", 0))
+            temps.append(t)
+        except:
+            pass
+
+    report["thermal_status"] = "OK" if max(temps) < 45 else "HIGH"
+
+    # 4. history presence
+    report["history_events"] = len(data["history"])
+    report["historical_faults"] = "YES" if len(data["history"]) > 5 else "LOW"
+
+    return report
 
 
-log = st.text_area("Paste Log Here", height=250)
+excel_map = load_excel()
 
-if st.button("Run Diagnosis"):
-    codes = extract_codes(log)
+xml_input = st.text_area("Paste XML Log", height=300)
 
-    if not codes:
-        st.warning("No error codes found.")
-    else:
-        for code in codes:
-            st.subheader(f"Code: {code}")
+if st.button("Run Full Diagnosis"):
+    try:
+        data = parse_xml(xml_input)
+        result = analyze(data)
 
-            if code in err_map:
-                st.success("Matched Error Code")
+        st.subheader("📊 Diagnostic Report")
+        st.json(result)
 
-                data = err_map[code]
+        st.subheader("🔍 System Snapshot")
+        st.json(data["system"])
 
-                # show clean output
-                st.write("**Error Details:**")
-                st.json(data)
+        st.subheader("📦 Module Overview")
+        st.write(data["modules"])
 
-            else:
-                st.error("Unknown Code")
+        st.subheader("📜 History Entries")
+        st.write(data["history"])
+
+    except Exception as e:
+        st.error(f"Error parsing XML: {e}")
