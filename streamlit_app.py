@@ -12,22 +12,25 @@ EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 @st.cache_data
-def load_excel():
-    xls = pd.ExcelFile(EXCEL_FILE)
+def load_data():
+    xls = pd.ExcelFile("Err Code and interpretation_V1.11_APS.xlsx")
 
     err_map = {}
 
     for sheet in xls.sheet_names:
-        if "err" in sheet.lower():
+        if "err code" in sheet.lower():
             df = pd.read_excel(xls, sheet)
             df.columns = [c.strip() for c in df.columns]
 
             for _, row in df.iterrows():
                 code = str(row.iloc[0]).strip()
-                err_map[code] = row.to_dict()
+
+                err_map[code] = {
+                    "name": str(row.iloc[1]) if len(row) > 1 else "Unknown",
+                    "description": str(row.iloc[2]) if len(row) > 2 else "No description available"
+                }
 
     return err_map
-
 
 def parse_xml(xml_text):
     root = ET.fromstring(xml_text)
