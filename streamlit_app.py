@@ -4,8 +4,8 @@ import pandas as pd
 
 st.set_page_config(page_title="Diagnostic Agent PRO", layout="wide")
 
-st.title("🧠 Diagnostic Agent PRO (Byte 9/10 Engine)")
-st.write("Detects Error Source (Byte 9) + Error Code (Byte 10) correctly")
+st.title("🧠 Diagnostic Agent PRO (Event Trigger Mode)")
+st.write("Shows ONLY real fault events when Byte 9 & 10 change from 00")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
@@ -36,7 +36,7 @@ def load_data():
 
 
 # -----------------------------
-# PARSE XML
+# PARSE XML HISTORY
 # -----------------------------
 def parse_xml(xml_text):
     root = ET.fromstring(xml_text)
@@ -50,39 +50,35 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# BYTE 9/10 ENGINE (FIXED LOGIC)
+# EVENT DETECTION (CORE LOGIC)
 # -----------------------------
-def detect_faults(history_entries):
+def detect_events(history):
 
-    faults = []
+    events = []
 
-    for i, entry in enumerate(history_entries):
+    for i in range(1, len(history)):
 
-        if len(entry) < 11:
+        prev = history[i - 1]
+        curr = history[i]
+
+        if len(prev) < 11 or len(curr) < 11:
             continue
 
-        byte9 = entry[9].lower()
-        byte10 = entry[10].lower()
+        prev_b9, prev_b10 = prev[9], prev[10]
+        curr_b9, curr_b10 = curr[9], curr[10]
 
-        # BYTE 9 = SOURCE (context only)
-        source = "UNKNOWN"
+        # ONLY TRIGGER WHEN BOTH CHANGE FROM 00 STATE
+        if prev_b9 == "00" and prev_b10 == "00":
 
-        if byte9 == "1f":
-            source = "HMI / Controller"
-        elif byte9 != "00":
-            source = f"Source Code {byte9}"
+            if curr_b9 != "00" or curr_b10 != "00":
 
-        # BYTE 10 = REAL ERROR CODE (LOOKUP KEY)
-        error_code = byte10
+                events.append({
+                    "entry": i,
+                    "byte9": curr_b9,
+                    "byte10": curr_b10
+                })
 
-        faults.append({
-            "entry": i,
-            "byte9_source": byte9,
-            "byte10_code": error_code,
-            "source_label": source
-        })
-
-    return faults
+    return events
 
 
 # -----------------------------
@@ -101,36 +97,33 @@ if st.button("Run Diagnosis"):
 
     try:
         history = parse_xml(xml_input)
-        faults = detect_faults(history)
+        events = detect_events(history)
 
-        st.subheader("📡 Fault Detection (Byte 9/10 Logic)")
+        st.subheader("🚨 Detected Fault Events")
 
-        for f in faults:
+        if not events:
+            st.success("No fault transitions detected (system stable)")
+        else:
 
-            st.write(f"Entry {f['entry']}")
+            for e in events:
 
-            st.write(f"Byte 9 (Source): {f['byte9_source']} → {f['source_label']}")
-            st.write(f"Byte 10 (Error Code): {f['byte10_code']}")
+                st.error(
+                    f"Entry {e['entry']} | Byte9: {e['byte9']} | Byte10: {e['byte10']}"
+                )
 
-            code = f["byte10_code"]
+                # ONLY LOOK UP BYTE 10 (real error code)
+                code = e["byte10"].lower()
 
-            # -----------------------------
-            # IMPORTANT FIX: LOOKUP BYTE 10
-            # -----------------------------
-            if code in err_map:
+                if code in err_map:
+                    err = err_map[code]
 
-                err = err_map[code]
+                    st.write("🧠 Error Name:", err["name"])
+                    st.write("📄 Description:", err["description"])
+                else:
+                    st.warning(f"No match in Err Code table for: {code}")
 
-                st.error(f"🚨 {err['name']}")
-                st.write(err["description"])
-
-            else:
-                st.warning(f"No match in Err Code table for: {code}")
-
-            st.divider()
-
-        st.subheader("📜 Raw History")
-        st.write(history)
+        st.subheader("📜 Total History Entries")
+        st.write(len(history))
 
     except Exception as e:
         st.error(f"Error parsing XML: {e}")
