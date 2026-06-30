@@ -4,46 +4,35 @@ import pandas as pd
 
 st.set_page_config(page_title="Diagnostic Agent PRO", layout="wide")
 
-st.title("🧠 Diagnostic Agent PRO (Byte-Level Engine)")
-st.write("Paste XML log — detects faults from HISTORY byte positions (9 & 10)")
+st.title("🧠 Diagnostic Agent PRO (Byte 9/10 Engine)")
+st.write("Detects Error Source (Byte 9) + Error Code (Byte 10) correctly")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 # -----------------------------
-# LOAD EXCEL (both tables)
+# LOAD EXCEL ERROR TABLE
 # -----------------------------
 @st.cache_data
 def load_data():
     xls = pd.ExcelFile(EXCEL_FILE)
 
     err_map = {}
-    source_map = {}
 
     for sheet in xls.sheet_names:
-
-        # Err Code sheet
         if "err code" in sheet.lower():
             df = pd.read_excel(xls, sheet)
             df.columns = [c.strip() for c in df.columns]
 
             for _, row in df.iterrows():
-                code = str(row.iloc[0]).strip()
+                code = str(row.iloc[0]).strip().lower()
+
                 err_map[code] = {
                     "name": str(row.iloc[1]) if len(row) > 1 else "Unknown",
                     "description": str(row.iloc[2]) if len(row) > 2 else "No description"
                 }
 
-        # Error Source sheet
-        if "source" in sheet.lower():
-            df = pd.read_excel(xls, sheet)
-            df.columns = [c.strip() for c in df.columns]
-
-            for _, row in df.iterrows():
-                key = str(row.iloc[0]).strip()
-                source_map[key] = row.to_dict()
-
-    return err_map, source_map
+    return err_map
 
 
 # -----------------------------
@@ -61,7 +50,7 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# BYTE POSITION FAULT DETECTOR
+# BYTE 9/10 ENGINE (FIXED LOGIC)
 # -----------------------------
 def detect_faults(history_entries):
 
@@ -72,35 +61,34 @@ def detect_faults(history_entries):
         if len(entry) < 11:
             continue
 
-        byte9 = entry[9]
-        byte10 = entry[10]
+        byte9 = entry[9].lower()
+        byte10 = entry[10].lower()
 
-        # KEY RULE FROM YOUR SYSTEM
-        if byte9 != "00" or byte10 != "00":
+        # BYTE 9 = SOURCE (context only)
+        source = "UNKNOWN"
 
-            if byte9 in ["1f", "1F"]:
-                faults.append({
-                    "entry": i,
-                    "byte": 9,
-                    "value": byte9,
-                    "type": "ERROR SOURCE (HMI / Controller)"
-                })
+        if byte9 == "1f":
+            source = "HMI / Controller"
+        elif byte9 != "00":
+            source = f"Source Code {byte9}"
 
-            if byte10 in ["77", "1f", "1F"]:
-                faults.append({
-                    "entry": i,
-                    "byte": 10,
-                    "value": byte10,
-                    "type": "ERROR CODE"
-                })
+        # BYTE 10 = REAL ERROR CODE (LOOKUP KEY)
+        error_code = byte10
+
+        faults.append({
+            "entry": i,
+            "byte9_source": byte9,
+            "byte10_code": error_code,
+            "source_label": source
+        })
 
     return faults
 
 
 # -----------------------------
-# LOAD EXCEL MAPS
+# LOAD EXCEL
 # -----------------------------
-err_map, source_map = load_data()
+err_map = load_data()
 
 
 # -----------------------------
@@ -113,32 +101,35 @@ if st.button("Run Diagnosis"):
 
     try:
         history = parse_xml(xml_input)
-
         faults = detect_faults(history)
 
-        st.subheader("📡 Byte-Level Fault Detection")
+        st.subheader("📡 Fault Detection (Byte 9/10 Logic)")
 
-        if not faults:
-            st.success("No faults detected in byte positions 9 & 10")
-        else:
-            for f in faults:
+        for f in faults:
 
-                st.error(
-                    f"Entry {f['entry']} | Byte {f['byte']} → {f['value']} | {f['type']}"
-                )
+            st.write(f"Entry {f['entry']}")
 
-                # MAP TO ERR CODE TABLE
-                code = f["value"].lower()
+            st.write(f"Byte 9 (Source): {f['byte9_source']} → {f['source_label']}")
+            st.write(f"Byte 10 (Error Code): {f['byte10_code']}")
 
-                if code in err_map:
-                    st.write("🧠 Matched in Err Code Table")
-                    st.write("**Name:**", err_map[code]["name"])
-                    st.write("**Description:**", err_map[code]["description"])
+            code = f["byte10_code"]
 
-                else:
-                    st.warning("No match in Err Code table")
+            # -----------------------------
+            # IMPORTANT FIX: LOOKUP BYTE 10
+            # -----------------------------
+            if code in err_map:
 
-        st.subheader("📜 Raw Parsed History")
+                err = err_map[code]
+
+                st.error(f"🚨 {err['name']}")
+                st.write(err["description"])
+
+            else:
+                st.warning(f"No match in Err Code table for: {code}")
+
+            st.divider()
+
+        st.subheader("📜 Raw History")
         st.write(history)
 
     except Exception as e:
