@@ -4,35 +4,46 @@ import pandas as pd
 
 st.set_page_config(page_title="Diagnostic Agent PRO", layout="wide")
 
-st.title("🧠 Diagnostic Agent PRO (Full Engine)")
-st.write("Paste full XML log to analyse system + history faults")
+st.title("🧠 Diagnostic Agent PRO (Byte-Level Engine)")
+st.write("Paste XML log — detects faults from HISTORY byte positions (9 & 10)")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 # -----------------------------
-# LOAD EXCEL (Err Code sheet)
+# LOAD EXCEL (both tables)
 # -----------------------------
 @st.cache_data
 def load_data():
     xls = pd.ExcelFile(EXCEL_FILE)
 
     err_map = {}
+    source_map = {}
 
     for sheet in xls.sheet_names:
+
+        # Err Code sheet
         if "err code" in sheet.lower():
             df = pd.read_excel(xls, sheet)
             df.columns = [c.strip() for c in df.columns]
 
             for _, row in df.iterrows():
                 code = str(row.iloc[0]).strip()
-
                 err_map[code] = {
                     "name": str(row.iloc[1]) if len(row) > 1 else "Unknown",
-                    "description": str(row.iloc[2]) if len(row) > 2 else "No description available"
+                    "description": str(row.iloc[2]) if len(row) > 2 else "No description"
                 }
 
-    return err_map
+        # Error Source sheet
+        if "source" in sheet.lower():
+            df = pd.read_excel(xls, sheet)
+            df.columns = [c.strip() for c in df.columns]
+
+            for _, row in df.iterrows():
+                key = str(row.iloc[0]).strip()
+                source_map[key] = row.to_dict()
+
+    return err_map, source_map
 
 
 # -----------------------------
@@ -41,107 +52,55 @@ def load_data():
 def parse_xml(xml_text):
     root = ET.fromstring(xml_text)
 
-    data = {}
-
-    # system properties
-    data["system"] = {}
-    for prop in root.findall(".//property"):
-        pid = prop.attrib.get("id")
-        val = prop.find("value")
-        if pid and val is not None:
-            data["system"][pid] = val.text
-
-    # modules
-    modules = []
-    for m in root.findall(".//modules/*"):
-        mod = {}
-        for child in m:
-            mod[child.tag] = child.text
-        modules.append(mod)
-
-    data["modules"] = modules
-
-    # history entries
     history = []
     for h in root.findall(".//history/entry"):
-        history.append(h.text.strip() if h.text else "")
+        if h.text:
+            history.append(h.text.split())
 
-    data["history"] = history
-
-    return data
+    return history
 
 
 # -----------------------------
-# HISTORY FAULT DETECTION
+# BYTE POSITION FAULT DETECTOR
 # -----------------------------
-def detect_history_faults(history_entries):
+def detect_faults(history_entries):
+
     faults = []
 
-    parsed = []
-    for entry in history_entries:
-        if not entry:
+    for i, entry in enumerate(history_entries):
+
+        if len(entry) < 11:
             continue
-        parsed.append(entry.split())
 
-    for i in range(1, len(parsed)):
-        prev = parsed[i - 1]
-        curr = parsed[i]
+        byte9 = entry[9]
+        byte10 = entry[10]
 
-        min_len = min(len(prev), len(curr))
+        # KEY RULE FROM YOUR SYSTEM
+        if byte9 != "00" or byte10 != "00":
 
-        for j in range(min_len):
-            if prev[j] != curr[j]:
+            if byte9 in ["1f", "1F"]:
                 faults.append({
-                    "position": j,
-                    "from": prev[j],
-                    "to": curr[j],
-                    "entry_index": i
+                    "entry": i,
+                    "byte": 9,
+                    "value": byte9,
+                    "type": "ERROR SOURCE (HMI / Controller)"
+                })
+
+            if byte10 in ["77", "1f", "1F"]:
+                faults.append({
+                    "entry": i,
+                    "byte": 10,
+                    "value": byte10,
+                    "type": "ERROR CODE"
                 })
 
     return faults
 
 
 # -----------------------------
-# SYSTEM ANALYSIS
+# LOAD EXCEL MAPS
 # -----------------------------
-def analyze(data):
-    report = {}
-
-    report["system_error"] = data["system"].get("System:ErrorCode", "00")
-
-    # voltage analysis
-    volts = []
-    for m in data["modules"]:
-        try:
-            volts.append(float(m.get("act", 0)))
-        except:
-            pass
-
-    if volts:
-        report["voltage_spread"] = round(max(volts) - min(volts), 3)
-        report["electrical_status"] = "IMBALANCED" if report["voltage_spread"] > 0.3 else "OK"
-
-    # temp analysis
-    temps = []
-    for m in data["modules"]:
-        try:
-            temps.append(float(m.get("act", 0)))
-        except:
-            pass
-
-    if temps:
-        report["thermal_status"] = "HIGH" if max(temps) > 45 else "OK"
-
-    # history
-    report["history_faults"] = detect_history_faults(data["history"])
-
-    return report
-
-
-# -----------------------------
-# LOAD EXCEL
-# -----------------------------
-err_map = load_data()
+err_map, source_map = load_data()
 
 
 # -----------------------------
@@ -149,60 +108,38 @@ err_map = load_data()
 # -----------------------------
 xml_input = st.text_area("Paste XML Log", height=300)
 
-if st.button("Run Full Diagnosis"):
+
+if st.button("Run Diagnosis"):
+
     try:
-        data = parse_xml(xml_input)
-        result = analyze(data)
+        history = parse_xml(xml_input)
 
-        st.subheader("📊 System Analysis")
-        st.json(result)
+        faults = detect_faults(history)
 
-        # -----------------------------
-        # SYSTEM ERROR LOOKUP
-        # -----------------------------
-        st.subheader("🧠 System Error Diagnosis")
+        st.subheader("📡 Byte-Level Fault Detection")
 
-        sys_code = result["system_error"]
-
-        if sys_code != "00" and sys_code in err_map:
-            err = err_map[sys_code]
-
-            st.error(f"Error Code: {sys_code}")
-            st.write(f"**Name:** {err['name']}")
-            st.write(f"**Description:** {err['description']}")
+        if not faults:
+            st.success("No faults detected in byte positions 9 & 10")
         else:
-            st.success("No active system error found")
+            for f in faults:
 
-        # -----------------------------
-        # HISTORY FAULTS
-        # -----------------------------
-        st.subheader("📡 History Fault Detection")
+                st.error(
+                    f"Entry {f['entry']} | Byte {f['byte']} → {f['value']} | {f['type']}"
+                )
 
-        history_faults = result["history_faults"]
-
-        if history_faults:
-            for f in history_faults:
-                code = f["to"]
-
-                st.write(f"Byte {f['position']}: {f['from']} → {f['to']}")
+                # MAP TO ERR CODE TABLE
+                code = f["value"].lower()
 
                 if code in err_map:
-                    err = err_map[code]
-                    st.error(f"{err['name']}")
-                    st.write(err["description"])
+                    st.write("🧠 Matched in Err Code Table")
+                    st.write("**Name:**", err_map[code]["name"])
+                    st.write("**Description:**", err_map[code]["description"])
+
                 else:
-                    st.warning(f"Unknown mapped code: {code}")
-        else:
-            st.info("No history anomalies detected")
+                    st.warning("No match in Err Code table")
 
-        # -----------------------------
-        # RAW SNAPSHOT
-        # -----------------------------
-        st.subheader("🔍 System Snapshot")
-        st.json(data["system"])
-
-        st.subheader("📦 Modules")
-        st.write(data["modules"])
+        st.subheader("📜 Raw Parsed History")
+        st.write(history)
 
     except Exception as e:
         st.error(f"Error parsing XML: {e}")
