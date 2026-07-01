@@ -4,14 +4,14 @@ import pandas as pd
 
 st.set_page_config(page_title="Diagnostic Agent PRO", layout="wide")
 
-st.title("🧠 Diagnostic Agent PRO (Event Trigger Mode)")
-st.write("Shows ONLY real fault events when Byte 9 & 10 change from 00")
+st.title("🧠 Diagnostic Agent PRO (Extended Entry Engine)")
+st.write("Handles Normal + Extended Error Source Entries (Byte 9 = 20 mode)")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 # -----------------------------
-# LOAD EXCEL ERROR TABLE
+# LOAD ERROR TABLE
 # -----------------------------
 @st.cache_data
 def load_data():
@@ -36,7 +36,7 @@ def load_data():
 
 
 # -----------------------------
-# PARSE XML HISTORY
+# PARSE XML
 # -----------------------------
 def parse_xml(xml_text):
     root = ET.fromstring(xml_text)
@@ -50,7 +50,7 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# EVENT DETECTION (CORE LOGIC)
+# DETECT FAULT EVENTS ONLY
 # -----------------------------
 def detect_events(history):
 
@@ -61,24 +61,68 @@ def detect_events(history):
         prev = history[i - 1]
         curr = history[i]
 
-        if len(prev) < 11 or len(curr) < 11:
+        if len(curr) < 11:
             continue
 
-        prev_b9, prev_b10 = prev[9], prev[10]
-        curr_b9, curr_b10 = curr[9], curr[10]
+        byte9 = curr[9]
+        byte10 = curr[10]
 
-        # ONLY TRIGGER WHEN BOTH CHANGE FROM 00 STATE
-        if prev_b9 == "00" and prev_b10 == "00":
+        # ONLY TRIGGER WHEN SOMETHING CHANGES FROM BASELINE
+        if prev[9] == "00" and prev[10] == "00":
 
-            if curr_b9 != "00" or curr_b10 != "00":
+            if byte9 != "00" or byte10 != "00":
 
                 events.append({
                     "entry": i,
-                    "byte9": curr_b9,
-                    "byte10": curr_b10
+                    "byte9": byte9,
+                    "byte10": byte10,
+                    "raw": curr
                 })
 
     return events
+
+
+# -----------------------------
+# EXTENDED MODE PARSER (BYTE 9 = 20)
+# -----------------------------
+def parse_extended_entry(entry, err_map):
+
+    """
+    When Byte 9 = 20:
+    - ignore fixed positions
+    - scan entire entry for known error codes
+    """
+
+    found = []
+
+    for token in entry:
+        code = token.lower()
+
+        if code in err_map:
+            found.append({
+                "code": code,
+                "name": err_map[code]["name"],
+                "description": err_map[code]["description"]
+            })
+
+    return found
+
+
+# -----------------------------
+# NORMAL MODE PARSER
+# -----------------------------
+def parse_normal(byte10, err_map):
+
+    code = byte10.lower()
+
+    if code in err_map:
+        return [{
+            "code": code,
+            "name": err_map[code]["name"],
+            "description": err_map[code]["description"]
+        }]
+
+    return []
 
 
 # -----------------------------
@@ -99,31 +143,50 @@ if st.button("Run Diagnosis"):
         history = parse_xml(xml_input)
         events = detect_events(history)
 
-        st.subheader("🚨 Detected Fault Events")
+        st.subheader("🚨 Fault Events")
 
         if not events:
-            st.success("No fault transitions detected (system stable)")
+            st.success("No fault events detected")
         else:
 
             for e in events:
 
-                st.error(
-                    f"Entry {e['entry']} | Byte9: {e['byte9']} | Byte10: {e['byte10']}"
-                )
+                st.write(f"Entry {e['entry']}")
 
-                # ONLY LOOK UP BYTE 10 (real error code)
-                code = e["byte10"].lower()
+                byte9 = e["byte9"]
+                byte10 = e["byte10"]
 
-                if code in err_map:
-                    err = err_map[code]
+                st.write(f"Byte 9: {byte9}")
+                st.write(f"Byte 10: {byte10}")
 
-                    st.write("🧠 Error Name:", err["name"])
-                    st.write("📄 Description:", err["description"])
+                # -----------------------------
+                # MODE SWITCH
+                # -----------------------------
+                if byte9 == "20":
+
+                    st.warning("Extended Error Source Entry Mode")
+
+                    results = parse_extended_entry(e["raw"], err_map)
+
+                    if results:
+                        for r in results:
+                            st.error(f"{r['name']}")
+                            st.write(r["description"])
+                    else:
+                        st.warning("No matching extended error found")
+
                 else:
-                    st.warning(f"No match in Err Code table for: {code}")
 
-        st.subheader("📜 Total History Entries")
-        st.write(len(history))
+                    results = parse_normal(byte10, err_map)
+
+                    if results:
+                        for r in results:
+                            st.error(f"{r['name']}")
+                            st.write(r["description"])
+                    else:
+                        st.warning(f"No match for code: {byte10}")
+
+                st.divider()
 
     except Exception as e:
         st.error(f"Error parsing XML: {e}")
