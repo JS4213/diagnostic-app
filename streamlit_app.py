@@ -2,10 +2,10 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 
-st.set_page_config(page_title="Diagnostic Agent PRO", layout="wide")
+st.set_page_config(page_title="Diagnostic Root Cause Engine", layout="wide")
 
-st.title("🧠 Diagnostic Agent PRO (Extended Entry Engine)")
-st.write("Handles Normal + Extended Error Source Entries (Byte 9 = 20 mode)")
+st.title("🧠 Root Cause Diagnostic Engine (FINAL)")
+st.write("Groups history events into true root causes (not noise detection)")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
@@ -50,7 +50,7 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# DETECT FAULT EVENTS ONLY
+# STEP 1: DETECT RAW EVENTS
 # -----------------------------
 def detect_events(history):
 
@@ -64,65 +64,53 @@ def detect_events(history):
         if len(curr) < 11:
             continue
 
-        byte9 = curr[9]
-        byte10 = curr[10]
-
-        # ONLY TRIGGER WHEN SOMETHING CHANGES FROM BASELINE
+        # ONLY detect transitions from baseline
         if prev[9] == "00" and prev[10] == "00":
 
-            if byte9 != "00" or byte10 != "00":
+            if curr[9] != "00" or curr[10] != "00":
 
                 events.append({
                     "entry": i,
-                    "byte9": byte9,
-                    "byte10": byte10,
-                    "raw": curr
+                    "byte9": curr[9],
+                    "byte10": curr[10]
                 })
 
     return events
 
 
 # -----------------------------
-# EXTENDED MODE PARSER (BYTE 9 = 20)
+# STEP 2: GROUP INTO ROOT CAUSES
 # -----------------------------
-def parse_extended_entry(entry, err_map):
+def build_root_causes(events):
 
-    """
-    When Byte 9 = 20:
-    - ignore fixed positions
-    - scan entire entry for known error codes
-    """
+    root_causes = []
 
-    found = []
+    used = set()
 
-    for token in entry:
-        code = token.lower()
+    for i, e in enumerate(events):
 
-        if code in err_map:
-            found.append({
-                "code": code,
-                "name": err_map[code]["name"],
-                "description": err_map[code]["description"]
-            })
+        if i in used:
+            continue
 
-    return found
+        cluster = [e]
 
+        # group nearby events (noise reduction)
+        for j in range(i + 1, len(events)):
+            if abs(events[j]["entry"] - e["entry"]) <= 2:
+                cluster.append(events[j])
+                used.add(j)
 
-# -----------------------------
-# NORMAL MODE PARSER
-# -----------------------------
-def parse_normal(byte10, err_map):
+        # determine primary fault = first byte10 occurrence
+        primary = cluster[0]
 
-    code = byte10.lower()
+        root_causes.append({
+            "start_entry": primary["entry"],
+            "byte9": primary["byte9"],
+            "byte10": primary["byte10"],
+            "cluster_size": len(cluster)
+        })
 
-    if code in err_map:
-        return [{
-            "code": code,
-            "name": err_map[code]["name"],
-            "description": err_map[code]["description"]
-        }]
-
-    return []
+    return root_causes
 
 
 # -----------------------------
@@ -137,56 +125,41 @@ err_map = load_data()
 xml_input = st.text_area("Paste XML Log", height=300)
 
 
-if st.button("Run Diagnosis"):
+if st.button("Run Root Cause Analysis"):
 
     try:
         history = parse_xml(xml_input)
+
         events = detect_events(history)
 
-        st.subheader("🚨 Fault Events")
+        root_causes = build_root_causes(events)
 
-        if not events:
-            st.success("No fault events detected")
-        else:
+        st.subheader("🔥 Root Cause Analysis")
 
-            for e in events:
+        if not root_causes:
+            st.success("No faults detected — system stable")
 
-                st.write(f"Entry {e['entry']}")
+        for rc in root_causes:
 
-                byte9 = e["byte9"]
-                byte10 = e["byte10"]
+            st.error(f"Root Fault at Entry {rc['start_entry']}")
 
-                st.write(f"Byte 9: {byte9}")
-                st.write(f"Byte 10: {byte10}")
+            st.write(f"Byte 9 (Source): {rc['byte9']}")
+            st.write(f"Byte 10 (Code): {rc['byte10']}")
+            st.write(f"Cluster Size: {rc['cluster_size']} event(s)")
 
-                # -----------------------------
-                # MODE SWITCH
-                # -----------------------------
-                if byte9 == "20":
+            code = rc["byte10"].lower()
 
-                    st.warning("Extended Error Source Entry Mode")
+            if code in err_map:
 
-                    results = parse_extended_entry(e["raw"], err_map)
+                st.success("🧠 Root Cause Identified")
 
-                    if results:
-                        for r in results:
-                            st.error(f"{r['name']}")
-                            st.write(r["description"])
-                    else:
-                        st.warning("No matching extended error found")
+                st.write("**Error Name:**", err_map[code]["name"])
+                st.write("**Description:**", err_map[code]["description"])
 
-                else:
+            else:
+                st.warning("No match in Err Code table")
 
-                    results = parse_normal(byte10, err_map)
-
-                    if results:
-                        for r in results:
-                            st.error(f"{r['name']}")
-                            st.write(r["description"])
-                    else:
-                        st.warning(f"No match for code: {byte10}")
-
-                st.divider()
+            st.divider()
 
     except Exception as e:
         st.error(f"Error parsing XML: {e}")
