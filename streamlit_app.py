@@ -1,19 +1,17 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
-from collections import defaultdict, Counter
 
-st.set_page_config(page_title="Fleet Learning AI Diagnostic System", layout="wide")
+st.set_page_config(page_title="Industrial AI Diagnostic System", layout="wide")
 
-st.title("🧠 Fleet Learning AI Diagnostic System")
-st.write("Learns fault behaviour across multiple logs (fleet intelligence mode)")
-
+st.title("🏭 Industrial AI Diagnostic System")
+st.write("Root cause analysis + timeline reconstruction + fault clustering engine")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 # -----------------------------
-# LOAD ERROR DATABASE
+# LOAD EXCEL MAPS
 # -----------------------------
 @st.cache_data
 def load_data():
@@ -52,7 +50,7 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# DETECT FAULT EVENTS
+# STEP 1: DETECT EVENTS
 # -----------------------------
 def detect_events(history):
 
@@ -71,93 +69,73 @@ def detect_events(history):
             if curr[9] != "00" or curr[10] != "00":
 
                 events.append({
-                    "byte9": curr[9].lower(),
-                    "byte10": curr[10].lower()
+                    "index": i,
+                    "byte9": curr[9],
+                    "byte10": curr[10],
+                    "raw": curr
                 })
 
     return events
 
 
 # -----------------------------
-# FLEET LEARNING ENGINE
+# STEP 2: CLUSTER EVENTS (FAULT INCIDENTS)
 # -----------------------------
-def fleet_learning_analysis(all_logs_events):
+def cluster_events(events):
 
-    # global learning tables
-    byte10_counts = Counter()
-    byte9_map = defaultdict(Counter)
+    if not events:
+        return []
 
-    for events in all_logs_events:
-        for e in events:
-            b9 = e["byte9"]
-            b10 = e["byte10"]
+    clusters = []
+    current_cluster = [events[0]]
 
-            byte10_counts[b10] += 1
-            byte9_map[b10][b9] += 1
+    for i in range(1, len(events)):
 
-    # build learned probability model
-    learned_model = {}
-
-    for code, count in byte10_counts.items():
-
-        most_common_source = byte9_map[code].most_common(1)[0][0]
-
-        confidence = min(95, 40 + count * 10)
-
-        learned_model[code] = {
-            "frequency": count,
-            "most_common_source": most_common_source,
-            "confidence": confidence
-        }
-
-    return learned_model
-
-
-# -----------------------------
-# PREDICTION ENGINE
-# -----------------------------
-def predict(events, model, err_map):
-
-    results = []
-
-    for e in events:
-
-        code = e["byte10"]
-
-        if code in model:
-            m = model[code]
-
-            risk = m["confidence"]
-
-            level = (
-                "LOW" if risk < 50 else
-                "MEDIUM" if risk < 70 else
-                "HIGH" if risk < 85 else
-                "CRITICAL"
-            )
-
-            results.append({
-                "code": code,
-                "risk": risk,
-                "level": level,
-                "frequency": m["frequency"],
-                "source": m["most_common_source"]
-            })
-
+        # if close in time → same fault incident
+        if events[i]["index"] - events[i-1]["index"] <= 2:
+            current_cluster.append(events[i])
         else:
-            results.append({
-                "code": code,
-                "risk": 30,
-                "level": "LOW",
-                "frequency": 1,
-                "source": e["byte9"]
-            })
+            clusters.append(current_cluster)
+            current_cluster = [events[i]]
 
-    return results
+    clusters.append(current_cluster)
+
+    return clusters
 
 
 # -----------------------------
-# LOAD ERROR MAP
+# STEP 3: TIMELINE + ROOT CAUSE LOGIC
+# -----------------------------
+def analyze_clusters(clusters):
+
+    incidents = []
+
+    for cluster in clusters:
+
+        primary = cluster[0]
+
+        # determine severity based on known patterns
+        severity = "LOW"
+
+        for e in cluster:
+            if e["byte10"].lower() in ["ef", "77", "1f"]:
+                severity = "HIGH"
+
+        incidents.append({
+            "start": primary["index"],
+            "end": cluster[-1]["index"],
+            "events": cluster,
+            "primary_byte9": primary["byte9"],
+            "primary_byte10": primary["byte10"],
+            "severity": severity,
+            "confidence": "HIGH" if len(cluster) > 1 else "MEDIUM"
+        })
+
+    return incidents
+
+
+# -----------------------------
+# LOAD ERROR TABLE
 # -----------------------------
 err_map = load_data()
 
@@ -165,37 +143,54 @@ err_map = load_data()
 # -----------------------------
 # UI
 # -----------------------------
-xml_input = st.text_area("Paste XML Log", height=250)
+xml_input = st.text_area("Paste XML Log", height=300)
 
 
-if st.button("Run Fleet AI Diagnosis"):
+if st.button("Run Industrial Diagnosis"):
 
     try:
         history = parse_xml(xml_input)
+
         events = detect_events(history)
 
-        # simulate fleet memory (single-log fallback for now)
-        fleet_model = fleet_learning_analysis([events])
+        clusters = cluster_events(events)
 
-        predictions = predict(events, fleet_model, err_map)
+        incidents = analyze_clusters(clusters)
 
-        st.subheader("🧠 Fleet Intelligence Output")
+        st.subheader("🏭 Industrial Diagnostic Report")
 
-        for p in predictions:
+        if not incidents:
+            st.success("No faults detected — system stable")
 
-            st.error(f"Code: {p['code']} | Risk: {p['risk']}% ({p['level']})")
+        for inc in incidents:
 
-            st.write(f"Frequency in fleet: {p['frequency']}")
-            st.write(f"Most common source (Byte9): {p['source']}")
+            st.error(f"Fault Incident: Entries {inc['start']} → {inc['end']}")
 
-            if p["code"] in err_map:
+            st.write(f"Severity: {inc['severity']}")
+            st.write(f"Confidence: {inc['confidence']}")
 
-                st.write("🧠 Known Fault:")
-                st.write(err_map[p["code"]]["name"])
-                st.write(err_map[p["code"]]["description"])
+            code = inc["primary_byte10"].lower()
+
+            # -----------------------------
+            # ROOT CAUSE LOOKUP
+            # -----------------------------
+            if code in err_map:
+
+                st.success("🧠 Root Cause Identified")
+
+                st.write("**Error Name:**", err_map[code]["name"])
+                st.write("**Description:**", err_map[code]["description"])
 
             else:
-                st.warning("Unknown fleet pattern")
+                st.warning(f"No match in error database for code: {code}")
+
+            # -----------------------------
+            # TIMELINE DISPLAY
+            # -----------------------------
+            st.write("📍 Event Timeline:")
+
+            for e in inc["events"]:
+                st.write(f"- Entry {e['index']} | B9:{e['byte9']} | B10:{e['byte10']}")
 
             st.divider()
 
