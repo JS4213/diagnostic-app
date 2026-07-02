@@ -1,18 +1,19 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
-from collections import Counter
+from collections import defaultdict, Counter
 
-st.set_page_config(page_title="Predictive AI Diagnostic System", layout="wide")
+st.set_page_config(page_title="Fleet Learning AI Diagnostic System", layout="wide")
 
-st.title("🔮 Predictive AI Diagnostic System")
-st.write("Detects faults + predicts future failures from byte behaviour patterns")
+st.title("🧠 Fleet Learning AI Diagnostic System")
+st.write("Learns fault behaviour across multiple logs (fleet intelligence mode)")
+
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 # -----------------------------
-# LOAD ERROR TABLE
+# LOAD ERROR DATABASE
 # -----------------------------
 @st.cache_data
 def load_data():
@@ -51,7 +52,7 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# DETECT RAW EVENTS
+# DETECT FAULT EVENTS
 # -----------------------------
 def detect_events(history):
 
@@ -70,73 +71,93 @@ def detect_events(history):
             if curr[9] != "00" or curr[10] != "00":
 
                 events.append({
-                    "index": i,
-                    "byte9": curr[9],
-                    "byte10": curr[10]
+                    "byte9": curr[9].lower(),
+                    "byte10": curr[10].lower()
                 })
 
     return events
 
 
 # -----------------------------
-# PREDICTIVE ANALYSIS ENGINE
+# FLEET LEARNING ENGINE
 # -----------------------------
-def predictive_analysis(events):
+def fleet_learning_analysis(all_logs_events):
 
-    if not events:
-        return []
+    # global learning tables
+    byte10_counts = Counter()
+    byte9_map = defaultdict(Counter)
 
-    predictions = []
+    for events in all_logs_events:
+        for e in events:
+            b9 = e["byte9"]
+            b10 = e["byte10"]
 
-    byte10_sequence = [e["byte10"].lower() for e in events]
-    byte9_sequence = [e["byte9"].lower() for e in events]
+            byte10_counts[b10] += 1
+            byte9_map[b10][b9] += 1
 
-    freq = Counter(byte10_sequence)
+    # build learned probability model
+    learned_model = {}
+
+    for code, count in byte10_counts.items():
+
+        most_common_source = byte9_map[code].most_common(1)[0][0]
+
+        confidence = min(95, 40 + count * 10)
+
+        learned_model[code] = {
+            "frequency": count,
+            "most_common_source": most_common_source,
+            "confidence": confidence
+        }
+
+    return learned_model
+
+
+# -----------------------------
+# PREDICTION ENGINE
+# -----------------------------
+def predict(events, model, err_map):
+
+    results = []
 
     for e in events:
 
-        code = e["byte10"].lower()
+        code = e["byte10"]
 
-        # BASE RISK
-        risk = 0
+        if code in model:
+            m = model[code]
 
-        # repeated occurrences = higher risk
-        risk += freq[code] * 20
+            risk = m["confidence"]
 
-        # known critical codes
-        if code in ["77", "ef"]:
-            risk += 40
+            level = (
+                "LOW" if risk < 50 else
+                "MEDIUM" if risk < 70 else
+                "HIGH" if risk < 85 else
+                "CRITICAL"
+            )
 
-        if code in ["1f"]:
-            risk += 25
+            results.append({
+                "code": code,
+                "risk": risk,
+                "level": level,
+                "frequency": m["frequency"],
+                "source": m["most_common_source"]
+            })
 
-        # escalation detection (pattern instability)
-        if len(set(byte10_sequence[-3:])) > 1:
-            risk += 20
-
-        # classify
-        if risk < 30:
-            level = "LOW"
-        elif risk < 60:
-            level = "MEDIUM"
-        elif risk < 85:
-            level = "HIGH"
         else:
-            level = "CRITICAL"
+            results.append({
+                "code": code,
+                "risk": 30,
+                "level": "LOW",
+                "frequency": 1,
+                "source": e["byte9"]
+            })
 
-        predictions.append({
-            "entry": e["index"],
-            "byte9": e["byte9"],
-            "byte10": e["byte10"],
-            "risk": risk,
-            "level": level
-        })
-
-    return predictions
+    return results
 
 
 # -----------------------------
-# LOAD EXCEL
+# LOAD ERROR MAP
 # -----------------------------
 err_map = load_data()
 
@@ -144,40 +165,37 @@ err_map = load_data()
 # -----------------------------
 # UI
 # -----------------------------
-xml_input = st.text_area("Paste XML Log", height=300)
+xml_input = st.text_area("Paste XML Log", height=250)
 
 
-if st.button("Run Predictive Diagnosis"):
+if st.button("Run Fleet AI Diagnosis"):
 
     try:
         history = parse_xml(xml_input)
-
         events = detect_events(history)
 
-        predictions = predictive_analysis(events)
+        # simulate fleet memory (single-log fallback for now)
+        fleet_model = fleet_learning_analysis([events])
 
-        st.subheader("🔮 Predictive Fault Analysis")
+        predictions = predict(events, fleet_model, err_map)
 
-        if not predictions:
-            st.success("No predictive fault patterns detected")
+        st.subheader("🧠 Fleet Intelligence Output")
 
         for p in predictions:
 
-            st.error(f"Entry {p['entry']} | Risk Level: {p['level']} ({p['risk']}%)")
+            st.error(f"Code: {p['code']} | Risk: {p['risk']}% ({p['level']})")
 
-            st.write(f"Byte 9: {p['byte9']}")
-            st.write(f"Byte 10: {p['byte10']}")
+            st.write(f"Frequency in fleet: {p['frequency']}")
+            st.write(f"Most common source (Byte9): {p['source']}")
 
-            code = p["byte10"].lower()
+            if p["code"] in err_map:
 
-            if code in err_map:
-
-                st.write("🧠 Predicted Fault:")
-                st.write("**", err_map[code]["name"], "**")
-                st.write(err_map[code]["description"])
+                st.write("🧠 Known Fault:")
+                st.write(err_map[p["code"]]["name"])
+                st.write(err_map[p["code"]]["description"])
 
             else:
-                st.warning("Unknown code (not in database)")
+                st.warning("Unknown fleet pattern")
 
             st.divider()
 
