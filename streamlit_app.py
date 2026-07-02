@@ -2,16 +2,16 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 
-st.set_page_config(page_title="Industrial AI Diagnostic System", layout="wide")
+st.set_page_config(page_title="Diagnostic Root Cause Engine", layout="wide")
 
-st.title("🏭 Industrial AI Diagnostic System")
-st.write("Root cause analysis + timeline reconstruction + fault clustering engine")
+st.title("🧠 Root Cause Diagnostic Engine (FINAL)")
+st.write("Groups history events into true root causes (not noise detection)")
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
 # -----------------------------
-# LOAD EXCEL MAPS
+# LOAD ERROR TABLE
 # -----------------------------
 @st.cache_data
 def load_data():
@@ -50,7 +50,7 @@ def parse_xml(xml_text):
 
 
 # -----------------------------
-# STEP 1: DETECT EVENTS
+# STEP 1: DETECT RAW EVENTS
 # -----------------------------
 def detect_events(history):
 
@@ -64,78 +64,57 @@ def detect_events(history):
         if len(curr) < 11:
             continue
 
+        # ONLY detect transitions from baseline
         if prev[9] == "00" and prev[10] == "00":
 
             if curr[9] != "00" or curr[10] != "00":
 
                 events.append({
-                    "index": i,
+                    "entry": i,
                     "byte9": curr[9],
-                    "byte10": curr[10],
-                    "raw": curr
+                    "byte10": curr[10]
                 })
 
     return events
 
 
 # -----------------------------
-# STEP 2: CLUSTER EVENTS (FAULT INCIDENTS)
+# STEP 2: GROUP INTO ROOT CAUSES
 # -----------------------------
-def cluster_events(events):
+def build_root_causes(events):
 
-    if not events:
-        return []
+    root_causes = []
 
-    clusters = []
-    current_cluster = [events[0]]
+    used = set()
 
-    for i in range(1, len(events)):
+    for i, e in enumerate(events):
 
-        # if close in time → same fault incident
-        if events[i]["index"] - events[i-1]["index"] <= 2:
-            current_cluster.append(events[i])
-        else:
-            clusters.append(current_cluster)
-            current_cluster = [events[i]]
+        if i in used:
+            continue
 
-    clusters.append(current_cluster)
+        cluster = [e]
 
-    return clusters
+        # group nearby events (noise reduction)
+        for j in range(i + 1, len(events)):
+            if abs(events[j]["entry"] - e["entry"]) <= 2:
+                cluster.append(events[j])
+                used.add(j)
 
-
-# -----------------------------
-# STEP 3: TIMELINE + ROOT CAUSE LOGIC
-# -----------------------------
-def analyze_clusters(clusters):
-
-    incidents = []
-
-    for cluster in clusters:
-
+        # determine primary fault = first byte10 occurrence
         primary = cluster[0]
 
-        # determine severity based on known patterns
-        severity = "LOW"
-
-        for e in cluster:
-            if e["byte10"].lower() in ["ef", "77", "1f"]:
-                severity = "HIGH"
-
-        incidents.append({
-            "start": primary["index"],
-            "end": cluster[-1]["index"],
-            "events": cluster,
-            "primary_byte9": primary["byte9"],
-            "primary_byte10": primary["byte10"],
-            "severity": severity,
-            "confidence": "HIGH" if len(cluster) > 1 else "MEDIUM"
+        root_causes.append({
+            "start_entry": primary["entry"],
+            "byte9": primary["byte9"],
+            "byte10": primary["byte10"],
+            "cluster_size": len(cluster)
         })
 
-    return incidents
+    return root_causes
 
 
 # -----------------------------
-# LOAD ERROR TABLE
+# LOAD EXCEL
 # -----------------------------
 err_map = load_data()
 
@@ -146,34 +125,30 @@ err_map = load_data()
 xml_input = st.text_area("Paste XML Log", height=300)
 
 
-if st.button("Run Industrial Diagnosis"):
+if st.button("Run Root Cause Analysis"):
 
     try:
         history = parse_xml(xml_input)
 
         events = detect_events(history)
 
-        clusters = cluster_events(events)
+        root_causes = build_root_causes(events)
 
-        incidents = analyze_clusters(clusters)
+        st.subheader("🔥 Root Cause Analysis")
 
-        st.subheader("🏭 Industrial Diagnostic Report")
-
-        if not incidents:
+        if not root_causes:
             st.success("No faults detected — system stable")
 
-        for inc in incidents:
+        for rc in root_causes:
 
-            st.error(f"Fault Incident: Entries {inc['start']} → {inc['end']}")
+            st.error(f"Root Fault at Entry {rc['start_entry']}")
 
-            st.write(f"Severity: {inc['severity']}")
-            st.write(f"Confidence: {inc['confidence']}")
+            st.write(f"Byte 9 (Source): {rc['byte9']}")
+            st.write(f"Byte 10 (Code): {rc['byte10']}")
+            st.write(f"Cluster Size: {rc['cluster_size']} event(s)")
 
-            code = inc["primary_byte10"].lower()
+            code = rc["byte10"].lower()
 
-            # -----------------------------
-            # ROOT CAUSE LOOKUP
-            # -----------------------------
             if code in err_map:
 
                 st.success("🧠 Root Cause Identified")
@@ -182,17 +157,9 @@ if st.button("Run Industrial Diagnosis"):
                 st.write("**Description:**", err_map[code]["description"])
 
             else:
-                st.warning(f"No match in error database for code: {code}")
-
-            # -----------------------------
-            # TIMELINE DISPLAY
-            # -----------------------------
-            st.write("📍 Event Timeline:")
-
-            for e in inc["events"]:
-                st.write(f"- Entry {e['index']} | B9:{e['byte9']} | B10:{e['byte10']}")
+                st.warning("No match in Err Code table")
 
             st.divider()
 
     except Exception as e:
-        st.error(f"System Error: {e}")
+        st.error(f"Error parsing XML: {e}")
