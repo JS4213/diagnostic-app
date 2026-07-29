@@ -2,164 +2,434 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 
-st.set_page_config(page_title="Diagnostic Root Cause Engine", layout="wide")
 
-st.title("🧠 Root Cause Diagnostic Engine (FINAL)")
-st.write("Groups history events into true root causes (not noise detection)")
+st.set_page_config(
+    page_title="Diagnostic Root Cause Engine",
+    layout="wide"
+)
+
+
+st.title("🧠 Diagnostic Root Cause Engine")
+st.write("Reads Reading History entries using Regular and Extended Error Source logic")
+
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
-# -----------------------------
-# LOAD ERROR TABLE
-# -----------------------------
+# =====================================================
+# LOAD EXCEL DATA
+# =====================================================
+
 @st.cache_data
 def load_data():
+
     xls = pd.ExcelFile(EXCEL_FILE)
 
-    err_map = {}
+    error_codes = {}
+    error_sources = {}
 
     for sheet in xls.sheet_names:
-        if "err code" in sheet.lower():
+
+        sheet_lower = sheet.lower()
+
+        # -----------------------------
+        # ERROR CODE TABLE
+        # -----------------------------
+        if "err code" in sheet_lower:
+
             df = pd.read_excel(xls, sheet)
-            df.columns = [c.strip() for c in df.columns]
+            df.columns = [str(c).strip() for c in df.columns]
 
             for _, row in df.iterrows():
+
                 code = str(row.iloc[0]).strip().lower()
 
-                err_map[code] = {
-                    "name": str(row.iloc[1]) if len(row) > 1 else "Unknown",
-                    "description": str(row.iloc[2]) if len(row) > 2 else "No description"
+                error_codes[code] = {
+                    "name": str(row.iloc[1]),
+                    "description": str(row.iloc[2])
                 }
 
-    return err_map
+
+        # -----------------------------
+        # ERROR SOURCE TABLE
+        # -----------------------------
+        if "source" in sheet_lower:
+
+            df = pd.read_excel(xls, sheet)
+            df.columns = [str(c).strip() for c in df.columns]
+
+            for _, row in df.iterrows():
+
+                code = str(row.iloc[0]).strip().lower()
+
+                error_sources[code] = {
+                    "description": str(row.iloc[1])
+                }
 
 
-# -----------------------------
-# PARSE XML
-# -----------------------------
-def parse_xml(xml_text):
+    return error_codes, error_sources
+
+
+
+# =====================================================
+# READ XML HISTORY
+# =====================================================
+
+def parse_history(xml_text):
+
     root = ET.fromstring(xml_text)
 
     history = []
-    for h in root.findall(".//history/entry"):
-        if h.text:
-            history.append(h.text.split())
+
+    for entry in root.findall(".//history/entry"):
+
+        if entry.text:
+
+            history.append(
+                entry.text.strip().split()
+            )
 
     return history
 
 
-# -----------------------------
-# STEP 1: DETECT RAW EVENTS
-# -----------------------------
-def detect_events(history):
+
+# =====================================================
+# FIND NEW FAULT EVENTS
+# =====================================================
+
+def find_fault_events(history):
 
     events = []
 
+
     for i in range(1, len(history)):
 
-        prev = history[i - 1]
-        curr = history[i]
 
-        if len(curr) < 11:
+        previous = history[i-1]
+        current = history[i]
+
+
+        if len(current) < 11:
             continue
 
-        # ONLY detect transitions from baseline
-        if prev[9] == "00" and prev[10] == "00":
 
-            if curr[9] != "00" or curr[10] != "00":
+        previous_source = previous[9]
+        previous_code = previous[10]
+
+
+        current_source = current[9]
+        current_code = current[10]
+
+
+
+        # Detect transition from normal state
+
+        if previous_source == "00" and previous_code == "00":
+
+
+            if current_source != "00" or current_code != "00":
+
 
                 events.append({
-                    "entry": i,
-                    "byte9": curr[9],
-                    "byte10": curr[10]
+                    "index": i,
+                    "entry": current
                 })
+
 
     return events
 
 
-# -----------------------------
-# STEP 2: GROUP INTO ROOT CAUSES
-# -----------------------------
-def build_root_causes(events):
 
-    root_causes = []
+# =====================================================
+# REGULAR ERROR ENTRY
+# =====================================================
 
-    used = set()
+def decode_regular(entry, error_codes, error_sources):
 
-    for i, e in enumerate(events):
 
-        if i in used:
+    source = entry[9].lower()
+    code = entry[10].lower()
+
+
+    result = {
+
+        "type": "Regular Error Source Entry",
+
+        "source_code": source,
+
+        "error_code": code
+
+    }
+
+
+    if source in error_sources:
+
+        result["source_description"] = (
+            error_sources[source]["description"]
+        )
+
+    else:
+
+        result["source_description"] = "Unknown source"
+
+
+
+    if code in error_codes:
+
+        result["error_name"] = (
+            error_codes[code]["name"]
+        )
+
+        result["error_description"] = (
+            error_codes[code]["description"]
+        )
+
+    else:
+
+        result["error_name"] = "Unknown"
+
+        result["error_description"] = "No matching error code"
+
+
+
+    return result
+
+
+
+# =====================================================
+# EXTENDED ERROR ENTRY
+# =====================================================
+
+def decode_extended(history, position, error_codes):
+
+
+    results = []
+
+
+    # next two rows contain module information
+
+    module_bytes = []
+
+
+    for row in history[position+1:position+3]:
+
+        module_bytes.extend(row)
+
+
+
+    # first 24 values = modules
+
+    for module_number, code in enumerate(module_bytes[:24], start=1):
+
+
+        code_clean = code.lower()
+
+
+        # ignore normal modules
+
+        if code_clean == "00":
+
             continue
 
-        cluster = [e]
-
-        # group nearby events (noise reduction)
-        for j in range(i + 1, len(events)):
-            if abs(events[j]["entry"] - e["entry"]) <= 2:
-                cluster.append(events[j])
-                used.add(j)
-
-        # determine primary fault = first byte10 occurrence
-        primary = cluster[0]
-
-        root_causes.append({
-            "start_entry": primary["entry"],
-            "byte9": primary["byte9"],
-            "byte10": primary["byte10"],
-            "cluster_size": len(cluster)
-        })
-
-    return root_causes
 
 
-# -----------------------------
-# LOAD EXCEL
-# -----------------------------
-err_map = load_data()
+        result = {
+
+            "type": "Extended Error Source Entry",
+
+            "module": module_number,
+
+            "error_code": code_clean
+
+        }
 
 
-# -----------------------------
-# UI
-# -----------------------------
-xml_input = st.text_area("Paste XML Log", height=300)
+
+        if code_clean in error_codes:
+
+            result["error_name"] = (
+                error_codes[code_clean]["name"]
+            )
+
+            result["error_description"] = (
+                error_codes[code_clean]["description"]
+            )
+
+        else:
+
+            result["error_name"] = "Unknown"
+
+            result["error_description"] = (
+                "No matching error code"
+            )
+
+
+
+        results.append(result)
+
+
+
+    return results
+
+
+
+# =====================================================
+# LOAD DATA
+# =====================================================
+
+error_codes, error_sources = load_data()
+
+
+
+# =====================================================
+# USER INPUT
+# =====================================================
+
+xml_input = st.text_area(
+    "Paste XML Reading History",
+    height=300
+)
+
 
 
 if st.button("Run Root Cause Analysis"):
 
+
     try:
-        history = parse_xml(xml_input)
 
-        events = detect_events(history)
 
-        root_causes = build_root_causes(events)
+        history = parse_history(xml_input)
 
-        st.subheader("🔥 Root Cause Analysis")
 
-        if not root_causes:
-            st.success("No faults detected — system stable")
+        events = find_fault_events(history)
 
-        for rc in root_causes:
 
-            st.error(f"Root Fault at Entry {rc['start_entry']}")
 
-            st.write(f"Byte 9 (Source): {rc['byte9']}")
-            st.write(f"Byte 10 (Code): {rc['byte10']}")
-            st.write(f"Cluster Size: {rc['cluster_size']} event(s)")
+        st.subheader("🔥 Root Cause Results")
 
-            code = rc["byte10"].lower()
 
-            if code in err_map:
 
-                st.success("🧠 Root Cause Identified")
+        if not events:
 
-                st.write("**Error Name:**", err_map[code]["name"])
-                st.write("**Description:**", err_map[code]["description"])
+            st.success(
+                "No new faults detected"
+            )
+
+
+
+        for event in events:
+
+
+            index = event["index"]
+
+            entry = event["entry"]
+
+
+            byte9 = entry[9].lower()
+
+
+
+            # ---------------------------------
+            # EXTENDED MODE
+            # ---------------------------------
+
+            if byte9 == "20":
+
+
+                st.warning(
+                    f"Extended Error Source Entry detected (History row {index})"
+                )
+
+
+                results = decode_extended(
+                    history,
+                    index,
+                    error_codes
+                )
+
+
+                for r in results:
+
+
+                    st.error(
+                        f"Module {r['module']} Fault"
+                    )
+
+
+                    st.write(
+                        "Error Code:",
+                        r["error_code"]
+                    )
+
+
+                    st.write(
+                        "Error Name:",
+                        r["error_name"]
+                    )
+
+
+                    st.write(
+                        "Description:",
+                        r["error_description"]
+                    )
+
+
+
+            # ---------------------------------
+            # REGULAR MODE
+            # ---------------------------------
 
             else:
-                st.warning("No match in Err Code table")
+
+
+                result = decode_regular(
+                    entry,
+                    error_codes,
+                    error_sources
+                )
+
+
+                st.error(
+                    result["type"]
+                )
+
+
+                st.write(
+                    "Error Source:",
+                    result["source_code"]
+                )
+
+
+                st.write(
+                    result["source_description"]
+                )
+
+
+                st.write(
+                    "Error Code:",
+                    result["error_code"]
+                )
+
+
+                st.write(
+                    "Error Name:",
+                    result["error_name"]
+                )
+
+
+                st.write(
+                    "Description:",
+                    result["error_description"]
+                )
+
+
 
             st.divider()
 
+
+
     except Exception as e:
-        st.error(f"Error parsing XML: {e}")
+
+        st.error(
+            f"Error processing XML: {e}"
+        )
