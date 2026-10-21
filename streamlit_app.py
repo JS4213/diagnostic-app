@@ -1,24 +1,57 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
+import re
 
+
+# =========================================================
+# PAGE SETUP
+# =========================================================
 
 st.set_page_config(
     page_title="Diagnostic Root Cause Engine",
     layout="wide"
 )
 
-
 st.title("🧠 Diagnostic Root Cause Engine")
-st.write("Reads Reading History entries using Regular and Extended Error Source logic")
+
+st.write(
+    "Paste the complete device log or Reading History below. "
+    "The engine automatically detects Regular and Extended Error Source entries."
+)
 
 
 EXCEL_FILE = "Err Code and interpretation_V1.11_APS.xlsx"
 
 
-# =====================================================
+# =========================================================
+# NORMALISE HEX CODES
+# =========================================================
+
+def normalise_code(value):
+
+    if value is None:
+        return ""
+
+    value = str(value).strip().lower()
+
+    # Remove Excel-style decimal formatting if present
+    if value.endswith(".0"):
+        value = value[:-2]
+
+    # Remove 0x if present
+    value = value.replace("0x", "")
+
+    # Make two-character hex codes consistent
+    if len(value) == 1:
+        value = "0" + value
+
+    return value
+
+
+# =========================================================
 # LOAD EXCEL DATA
-# =====================================================
+# =========================================================
 
 @st.cache_data
 def load_data():
@@ -32,404 +65,633 @@ def load_data():
 
         sheet_lower = sheet.lower()
 
-        # -----------------------------
-        # ERROR CODE TABLE
-        # -----------------------------
+        # -------------------------------------------------
+        # ERR CODE SHEET
+        # -------------------------------------------------
+
         if "err code" in sheet_lower:
 
             df = pd.read_excel(xls, sheet)
-            df.columns = [str(c).strip() for c in df.columns]
+
+            df.columns = [
+                str(c).strip()
+                for c in df.columns
+            ]
 
             for _, row in df.iterrows():
 
-                code = str(row.iloc[0]).strip().lower()
+                if len(row) < 3:
+                    continue
+
+                code = normalise_code(row.iloc[0])
+
+                if not code:
+                    continue
 
                 error_codes[code] = {
-                    "name": str(row.iloc[1]),
-                    "description": str(row.iloc[2])
+                    "name": str(row.iloc[1]).strip(),
+                    "description": str(row.iloc[2]).strip()
                 }
 
 
-        # -----------------------------
-        # ERROR SOURCE TABLE
-        # -----------------------------
+        # -------------------------------------------------
+        # ERROR SOURCE SHEET
+        # -------------------------------------------------
+
         if "source" in sheet_lower:
 
             df = pd.read_excel(xls, sheet)
-            df.columns = [str(c).strip() for c in df.columns]
+
+            df.columns = [
+                str(c).strip()
+                for c in df.columns
+            ]
 
             for _, row in df.iterrows():
 
-                code = str(row.iloc[0]).strip().lower()
+                if len(row) < 2:
+                    continue
+
+                code = normalise_code(row.iloc[0])
+
+                if not code:
+                    continue
 
                 error_sources[code] = {
-                    "description": str(row.iloc[1])
+                    "description": str(row.iloc[1]).strip()
                 }
 
 
     return error_codes, error_sources
 
 
+# =========================================================
+# EXTRACT HISTORY ENTRIES
+# =========================================================
 
-# =====================================================
-# READ XML HISTORY
-# =====================================================
+def extract_history_entries(text):
 
-def parse_history(xml_text):
+    """
+    Accepts either:
 
-    root = ET.fromstring(xml_text)
+    1. Complete XML
+    2. XML containing <entry> records
+    3. Raw history lines
 
-    history = []
+    This prevents the 'junk after document element'
+    error when multiple <entry> elements are pasted.
+    """
 
-    for entry in root.findall(".//history/entry"):
+    entries = []
 
-        if entry.text:
 
-            history.append(
-                entry.text.strip().split()
+    # -----------------------------------------------------
+    # FIRST: LOOK FOR <entry>...</entry>
+    # -----------------------------------------------------
+
+    xml_entries = re.findall(
+        r"<entry\b[^>]*>(.*?)</entry>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+
+    if xml_entries:
+
+        for item in xml_entries:
+
+            bytes_found = re.findall(
+                r"\b[0-9a-fA-F]{2}\b",
+                item
             )
 
-    return history
+            if bytes_found:
+
+                entries.append([
+                    normalise_code(x)
+                    for x in bytes_found
+                ])
+
+        return entries
 
 
+    # -----------------------------------------------------
+    # SECOND: TRY COMPLETE XML
+    # -----------------------------------------------------
 
-# =====================================================
-# FIND NEW FAULT EVENTS
-# =====================================================
+    try:
 
-def find_fault_events(history):
+        root = ET.fromstring(text)
+
+        for entry in root.findall(".//history/entry"):
+
+            if entry.text:
+
+                bytes_found = re.findall(
+                    r"\b[0-9a-fA-F]{2}\b",
+                    entry.text
+                )
+
+                if bytes_found:
+
+                    entries.append([
+                        normalise_code(x)
+                        for x in bytes_found
+                    ])
+
+        if entries:
+            return entries
+
+    except Exception:
+        pass
+
+
+    # -----------------------------------------------------
+    # THIRD: RAW HEX LINES
+    # -----------------------------------------------------
+
+    for line in text.splitlines():
+
+        bytes_found = re.findall(
+            r"\b[0-9a-fA-F]{2}\b",
+            line
+        )
+
+        if len(bytes_found) >= 8:
+
+            entries.append([
+                normalise_code(x)
+                for x in bytes_found
+            ])
+
+
+    return entries
+
+
+# =========================================================
+# FIND REGULAR FAULT EVENTS
+# =========================================================
+
+def find_regular_events(history):
 
     events = []
 
-
     for i in range(1, len(history)):
 
-
-        previous = history[i-1]
+        previous = history[i - 1]
         current = history[i]
 
+        if len(previous) < 11:
+            continue
 
         if len(current) < 11:
             continue
 
 
-        previous_source = previous[9]
-        previous_code = previous[10]
+        previous_source = normalise_code(previous[9])
+        previous_code = normalise_code(previous[10])
+
+        current_source = normalise_code(current[9])
+        current_code = normalise_code(current[10])
 
 
-        current_source = current[9]
-        current_code = current[10]
+        # -------------------------------------------------
+        # REGULAR ERROR ENTRY
+        #
+        # Previous state = 00 / 00
+        # Current state = something other than 00 / 00
+        # -------------------------------------------------
 
+        if (
+            previous_source == "00"
+            and
+            previous_code == "00"
+            and
+            (
+                current_source != "00"
+                or
+                current_code != "00"
+            )
+        ):
 
-
-        # Detect transition from normal state
-
-        if previous_source == "00" and previous_code == "00":
-
-
-            if current_source != "00" or current_code != "00":
-
-
-                events.append({
-                    "index": i,
-                    "entry": current
-                })
+            events.append({
+                "index": i,
+                "type": "regular",
+                "source": current_source,
+                "code": current_code
+            })
 
 
     return events
 
 
+# =========================================================
+# FIND EXTENDED ERROR SOURCE EVENTS
+# =========================================================
 
-# =====================================================
-# REGULAR ERROR ENTRY
-# =====================================================
+def find_extended_events(history):
 
-def decode_regular(entry, error_codes, error_sources):
-
-
-    source = entry[9].lower()
-    code = entry[10].lower()
+    events = []
 
 
-    result = {
+    for i, current in enumerate(history):
 
-        "type": "Regular Error Source Entry",
-
-        "source_code": source,
-
-        "error_code": code
-
-    }
-
-
-    if source in error_sources:
-
-        result["source_description"] = (
-            error_sources[source]["description"]
-        )
-
-    else:
-
-        result["source_description"] = "Unknown source"
-
-
-
-    if code in error_codes:
-
-        result["error_name"] = (
-            error_codes[code]["name"]
-        )
-
-        result["error_description"] = (
-            error_codes[code]["description"]
-        )
-
-    else:
-
-        result["error_name"] = "Unknown"
-
-        result["error_description"] = "No matching error code"
-
-
-
-    return result
-
-
-
-# =====================================================
-# EXTENDED ERROR ENTRY
-# =====================================================
-
-def decode_extended(history, position, error_codes):
-
-
-    results = []
-
-
-    # next two rows contain module information
-
-    module_bytes = []
-
-
-    for row in history[position+1:position+3]:
-
-        module_bytes.extend(row)
-
-
-
-    # first 24 values = modules
-
-    for module_number, code in enumerate(module_bytes[:24], start=1):
-
-
-        code_clean = code.lower()
-
-
-        # ignore normal modules
-
-        if code_clean == "00":
-
+        if len(current) < 11:
             continue
 
 
-
-        result = {
-
-            "type": "Extended Error Source Entry",
-
-            "module": module_number,
-
-            "error_code": code_clean
-
-        }
+        byte9 = normalise_code(current[9])
 
 
+        # -------------------------------------------------
+        # BYTE 9 = 20
+        #
+        # This is an Extended Error Source Entry
+        # -------------------------------------------------
 
-        if code_clean in error_codes:
+        if byte9 != "20":
+            continue
 
-            result["error_name"] = (
-                error_codes[code_clean]["name"]
+
+        # Need the following TWO rows
+        if i + 2 >= len(history):
+            continue
+
+
+        row1 = history[i + 1]
+        row2 = history[i + 2]
+
+
+        module_data = row1 + row2
+
+
+        # First 24 values correspond to Modules 1-24
+        module_data = module_data[:24]
+
+
+        module_faults = []
+
+
+        for module_number, error_code in enumerate(
+            module_data,
+            start=1
+        ):
+
+            error_code = normalise_code(error_code)
+
+
+            # 00 = no error
+            if error_code == "00":
+                continue
+
+
+            # FF is unused/invalid padding
+            if error_code == "ff":
+                continue
+
+
+            module_faults.append({
+                "module": module_number,
+                "code": error_code
+            })
+
+
+        if module_faults:
+
+            events.append({
+                "index": i,
+                "type": "extended",
+                "modules": module_faults
+            })
+
+
+    return events
+
+
+# =========================================================
+# REMOVE DUPLICATE EVENTS
+# =========================================================
+
+def remove_duplicates(events):
+
+    unique = []
+    seen = set()
+
+
+    for event in events:
+
+        if event["type"] == "regular":
+
+            key = (
+                "regular",
+                event["source"],
+                event["code"]
             )
 
-            result["error_description"] = (
-                error_codes[code_clean]["description"]
-            )
 
         else:
 
-            result["error_name"] = "Unknown"
+            module_key = tuple(
+                (
+                    x["module"],
+                    x["code"]
+                )
+                for x in event["modules"]
+            )
 
-            result["error_description"] = (
-                "No matching error code"
+            key = (
+                "extended",
+                module_key
             )
 
 
+        if key not in seen:
 
-        results.append(result)
+            seen.add(key)
 
-
-
-    return results
-
+            unique.append(event)
 
 
-# =====================================================
-# LOAD DATA
-# =====================================================
-
-error_codes, error_sources = load_data()
+    return unique
 
 
+# =========================================================
+# LOAD EXCEL
+# =========================================================
 
-# =====================================================
+try:
+
+    error_codes, error_sources = load_data()
+
+except Exception as e:
+
+    st.error(
+        "I couldn't load the Excel file. "
+        "Make sure 'Err Code and interpretation_V1.11_APS.xlsx' "
+        "is in the same GitHub repository as this app."
+    )
+
+    st.stop()
+
+
+# =========================================================
 # USER INPUT
-# =====================================================
+# =========================================================
 
 xml_input = st.text_area(
-    "Paste XML Reading History",
-    height=300
+    "Paste Device Reading History Here",
+    height=400,
+    placeholder="Paste the complete log from your Notes app here..."
 )
 
 
+# =========================================================
+# RUN DIAGNOSIS
+# =========================================================
 
-if st.button("Run Root Cause Analysis"):
+if st.button(
+    "🔎 Run Root Cause Analysis",
+    type="primary"
+):
+
+    if not xml_input.strip():
+
+        st.warning(
+            "Please paste a Reading History log first."
+        )
+
+        st.stop()
 
 
     try:
 
+        # -------------------------------------------------
+        # EXTRACT HISTORY
+        # -------------------------------------------------
 
-        history = parse_history(xml_input)
-
-
-        events = find_fault_events(history)
-
-
-
-        st.subheader("🔥 Root Cause Results")
+        history = extract_history_entries(xml_input)
 
 
+        if not history:
 
-        if not events:
-
-            st.success(
-                "No new faults detected"
+            st.error(
+                "I couldn't find any valid Reading History entries."
             )
 
+            st.stop()
 
 
-        for event in events:
+        # -------------------------------------------------
+        # FIND REGULAR FAULTS
+        # -------------------------------------------------
+
+        regular_events = find_regular_events(history)
 
 
-            index = event["index"]
+        # -------------------------------------------------
+        # FIND EXTENDED FAULTS
+        # -------------------------------------------------
 
-            entry = event["entry"]
-
-
-            byte9 = entry[9].lower()
-
+        extended_events = find_extended_events(history)
 
 
-            # ---------------------------------
-            # EXTENDED MODE
-            # ---------------------------------
+        # -------------------------------------------------
+        # COMBINE
+        # -------------------------------------------------
 
-            if byte9 == "20":
-
-
-                st.warning(
-                    f"Extended Error Source Entry detected (History row {index})"
-                )
-
-
-                results = decode_extended(
-                    history,
-                    index,
-                    error_codes
-                )
+        all_events = (
+            regular_events
+            +
+            extended_events
+        )
 
 
-                for r in results:
+        # -------------------------------------------------
+        # REMOVE DUPLICATES
+        # -------------------------------------------------
+
+        all_events = remove_duplicates(all_events)
 
 
-                    st.error(
-                        f"Module {r['module']} Fault"
-                    )
+        # =================================================
+        # RESULTS
+        # =================================================
+
+        st.subheader("🔥 Diagnostic Result")
 
 
-                    st.write(
-                        "Error Code:",
-                        r["error_code"]
-                    )
+        if not all_events:
+
+            st.success(
+                "No new faults detected in the Reading History."
+            )
+
+        else:
+
+            # =================================================
+            # REGULAR EVENTS
+            # =================================================
+
+            for event in all_events:
+
+                if event["type"] != "regular":
+                    continue
 
 
-                    st.write(
-                        "Error Name:",
-                        r["error_name"]
-                    )
-
-
-                    st.write(
-                        "Description:",
-                        r["error_description"]
-                    )
-
-
-
-            # ---------------------------------
-            # REGULAR MODE
-            # ---------------------------------
-
-            else:
-
-
-                result = decode_regular(
-                    entry,
-                    error_codes,
-                    error_sources
-                )
+                source = event["source"]
+                code = event["code"]
 
 
                 st.error(
-                    result["type"]
+                    "🚨 Fault Detected"
                 )
 
 
-                st.write(
-                    "Error Source:",
-                    result["source_code"]
+                # -------------------------------------------------
+                # ERROR SOURCE
+                # -------------------------------------------------
+
+                st.markdown(
+                    f"### Error Source: `{source.upper()}`"
                 )
 
 
-                st.write(
-                    result["source_description"]
+                if source in error_sources:
+
+                    st.write(
+                        error_sources[source]["description"]
+                    )
+
+                else:
+
+                    st.warning(
+                        "Error source not found in "
+                        "Error Source_komplete."
+                    )
+
+
+                # -------------------------------------------------
+                # ERROR CODE
+                # -------------------------------------------------
+
+                st.markdown(
+                    f"### Error Code: `{code.upper()}`"
                 )
 
 
-                st.write(
-                    "Error Code:",
-                    result["error_code"]
+                if code in error_codes:
+
+                    st.write(
+                        "**Error Name:** "
+                        + error_codes[code]["name"]
+                    )
+
+                    st.write(
+                        "**Description:** "
+                        + error_codes[code]["description"]
+                    )
+
+                else:
+
+                    st.warning(
+                        f"Error code `{code.upper()}` "
+                        "was not found in the Err Code sheet."
+                    )
+
+
+                st.caption(
+                    f"Detected at history entry {event['index'] + 1}"
                 )
 
 
-                st.write(
-                    "Error Name:",
-                    result["error_name"]
+                st.divider()
+
+
+            # =================================================
+            # EXTENDED EVENTS
+            # =================================================
+
+            for event in all_events:
+
+                if event["type"] != "extended":
+                    continue
+
+
+                st.error(
+                    "🚨 Extended Error Source Entry Detected"
                 )
 
 
-                st.write(
-                    "Description:",
-                    result["error_description"]
+                st.markdown(
+                    "### Extended Module Faults"
                 )
 
 
+                for module_fault in event["modules"]:
 
-            st.divider()
+                    module_number = module_fault["module"]
+                    code = module_fault["code"]
 
+
+                    st.markdown(
+                        f"#### Module {module_number}"
+                    )
+
+
+                    st.write(
+                        f"**Error Code:** `{code.upper()}`"
+                    )
+
+
+                    # -------------------------------------------------
+                    # LOOK UP ERROR CODE
+                    # -------------------------------------------------
+
+                    if code in error_codes:
+
+                        st.write(
+                            "**Error Name:** "
+                            + error_codes[code]["name"]
+                        )
+
+                        st.write(
+                            "**Description:** "
+                            + error_codes[code]["description"]
+                        )
+
+                    else:
+
+                        st.warning(
+                            f"Error code `{code.upper()}` "
+                            "was not found in the Err Code sheet."
+                        )
+
+
+                st.caption(
+                    f"Detected at history entry {event['index'] + 1}"
+                )
+
+
+                st.divider()
+
+
+        # =================================================
+        # SMALL SUMMARY
+        # =================================================
+
+        st.subheader("📊 Analysis Summary")
+
+        st.write(
+            f"History entries analysed: **{len(history)}**"
+        )
+
+        st.write(
+            f"Fault events detected: **{len(all_events)}**"
+        )
 
 
     except Exception as e:
 
         st.error(
-            f"Error processing XML: {e}"
+            f"Something went wrong while analysing the log: {e}"
         )
